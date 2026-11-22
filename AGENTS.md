@@ -18,9 +18,12 @@ agent/     智能体装配与终端运行
 ```
 
 - `core/llm.py` 默认返回 `ReasoningChatModel`，用于提取 `reasoning_content`。
+- 模型配置一律来自 `.env` 的 `LLM_*`：`core/config.py` 负责读取和解析，`core/llm.py` 只透传。代码里不要硬编码温度、超时、重试次数、模型名或地址。
 - `agent/graph.py` 用 `create_agent()` 组装模型、工具和系统提示词。
 - `agent/run.py` 是终端对话入口，负责 `ask_user` 的 interrupt / resume。
-- `langgraph.json` 是 `langgraph dev` / Studio 的入口清单。
+- `agent/contact_graph.py` 只挂 `ask_user`，用 `ToolStrategy(ContactInfo)` 输出结构化联系方式。
+- `agent/contact_schema.py` 定义 `ContactInfo` 的 Pydantic 校验。
+- `langgraph.json` 是 `langgraph dev` / Studio 的入口清单，当前注册了 `agent` 和 `contact_agent`。
 - `start-dev.cmd` 是 Windows 启动脚本，强制 `PYTHONUTF8=1`。
 
 ## Tag 约定
@@ -38,7 +41,7 @@ agent/     智能体装配与终端运行
 | Tag | 主题 | 一句话总结 | 日期 |
 |---|---|---|---|
 | day00 | 最小骨架 | 搭好 core/tools/agent 三层，接入 3 个工具，支持 ask_user 暂停/恢复 | 2026-11-22 |
-| day01 | 待填写 | 待填写 | 待填写 |
+| day01 | 结构化输出 | 独立联系方式图对比 ToolStrategy / ProviderStrategy，定位思考模式下 tool_choice 的 400 | 2026-11-22 |
 
 ### day00 - 最小骨架
 
@@ -49,6 +52,21 @@ agent/     智能体装配与终端运行
 - 怎么验证：`.\start-dev.cmd` 启动本地服务，打开 Studio；终端运行 `python main.py`。
 - 结论/坑：Windows 下 `langgraph dev` 必须启用 `PYTHONUTF8=1`，否则会因 GBK 编码读取文件报错；`.env` 不提交。
 - 相关文件：`core/`、`tools/`、`agent/`、`langgraph.json`、`start-dev.cmd`。
+
+### day01 - 结构化输出
+
+- 日期：2026-11-22
+- 一句话：把联系方式收集做成独立图，对比 ToolStrategy 与 ProviderStrategy 两种结构化输出，并定位思考模式下 tool_choice 引起的 400。
+- 改了什么：
+  - 新增 `agent/contact_schema.py`：`ContactInfo` 只做最简校验，姓名/地址必须是字符串，电话必须纯数字。
+  - 新增 `agent/contact_graph.py`：只挂 `ask_user`，用 `ToolStrategy(ContactInfo)` 输出结构化结果；在 `langgraph.json` 注册 `contact_agent`。
+  - `core/config.py` / `core/llm.py`：模型配置全部改为从 `.env` 读取，新增 `LLM_TEMPERATURE`、`LLM_MAX_TOKENS`、`LLM_TIMEOUT`、`LLM_MAX_RETRIES`、`LLM_ENABLE_THINKING`；删除温度/超时/重试次数和模型名、地址的硬编码。
+  - `.env.example` 补齐参数模板（英文注释，避免 GBK 读取问题）；README 更新环境变量、读取链路和 400 排错。
+  - 新增 `docs/structured-output.md`：三种结构化输出实现的底层差异与踩坑记录。
+- 为什么：学习结构化输出在 OpenAI 兼容 API 上的不同实现路径，同时把模型参数集中到 `.env` 管理。
+- 怎么验证：`ruff check .` 通过；`contact_agent` 在 `LLM_ENABLE_THINKING=false` 下返回 `ContactInfo`，在 `true` 下复现 400；`ProviderStrategy` 在思考模式下正常返回；`tool_choice="auto"` 在思考模式下能正常调用工具。
+- 结论/坑：思考模式不接受强制 `tool_choice`（`required` 或指定函数对象报 400）；`ToolStrategy` 内部正是把 `tool_choice` 设成 `"any"` 再被转成 `"required"`，因此与之冲突；指定具体函数名时服务端不报错但静默不返回 `tool_calls`。直接传 schema 会走 `AutoStrategy`，但内置白名单不含 qwen 模型，最终仍回落到 `ToolStrategy`。
+- 相关文件：`agent/contact_schema.py`、`agent/contact_graph.py`、`langgraph.json`、`core/config.py`、`core/llm.py`、`.env.example`、`README.md`、`docs/structured-output.md`。
 
 ### 每日记录模板
 

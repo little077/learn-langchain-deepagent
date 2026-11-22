@@ -22,7 +22,9 @@ langchain-python/
 │  └─ web_search.py            # ddgs 网页搜索
 ├─ agent/                      # 智能体装配与运行
 │  ├─ graph.py                 # 模型 + 工具 + 提示词 → 图
-│  └─ run.py                   # 终端对话循环
+│  ├─ run.py                   # 终端对话循环
+│  ├─ contact_schema.py        # ContactInfo Pydantic 校验
+│  └─ contact_graph.py         # 联系方式收集 Agent（ToolStrategy）
 ├─ main.py                     # 终端入口
 ├─ start-dev.cmd               # Windows 启动脚本（强制 UTF-8）
 ├─ langgraph.json              # langgraph dev / Studio 入口清单
@@ -96,6 +98,13 @@ langchain-python/
   - 本地运行时创建 `InMemorySaver`，并生成一个 `thread_id`。
   - 捕获结果里的 `__interrupt__`，提示用户输入，再用 `Command(resume=...)` 恢复。
   - 打印最终回答，并在有思维链时打印 `[思考] ...`。
+- `contact_schema.py`
+  - 定义 `ContactInfo`：姓名、电话、地址。
+  - 只做最基础的校验：字段类型是不是 `str`，电话是不是纯数字。
+- `contact_graph.py`
+  - 只挂 `ask_user` 一个工具。
+  - 用 `ToolStrategy(ContactInfo)` 让 agent 返回结构化联系方式。
+  - 在 `langgraph.json` 里注册为 `contact_agent`。
 
 ### 根目录文件
 
@@ -137,6 +146,27 @@ main.py
      → 用户回答 → Command(resume=...) → 工具返回 → 模型 → 最终回答
 ```
 
+## 联系方式结构化 Agent
+
+[agent/contact_graph.py](agent/contact_graph.py) 是一个独立的图，在 `langgraph.json` 里注册为 `contact_agent`：
+
+- 模型：仍然从 `.env` 读取，复用 `build_model()`。
+- 工具：只挂 `ask_user`。
+- 系统提示词：缺什么问什么，一次问一个；信息齐全后输出结构化结果。
+- 输出：`response_format=ToolStrategy(ContactInfo, handle_errors=True)`。
+- 校验：`ContactInfo` 定义在 [agent/contact_schema.py](agent/contact_schema.py)，只保留两条最朴素的规则：
+  - 姓名、地址：必须是字符串；
+  - 电话：必须是纯数字，出现空格、`+86`、短横线都会校验失败。
+- 校验失败时，`handle_errors=True` 会把错误交回模型重试。
+
+启动 `.\start-dev.cmd` 后，在 Studio 里选择 `contact_agent`，输入：
+
+```text
+帮我登记联系方式
+```
+
+模型会先调用 `ask_user` 问缺失信息；回答后返回 `ContactInfo` 结构化结果。
+
 ## 环境变量
 
 第一次使用先复制模板：
@@ -150,8 +180,13 @@ Copy-Item .env.example .env
 | 变量 | 是否必填 | 说明 |
 |---|---|---|
 | `LLM_API_KEY` | **必填** | 百炼、DeepSeek 或任何 OpenAI 兼容服务的 Key |
-| `LLM_BASE_URL` | 已给默认 | 百炼地址：`https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| `LLM_MODEL` | 已给默认 | 模板用 `qwen-plus`；换成账号已开通的模型即可 |
+| `LLM_BASE_URL` | **必填** | 代码里没有兜底地址，按你的服务填写 |
+| `LLM_MODEL` | **必填** | 代码里没有兜底模型名，填账号已开通的模型 |
+| `LLM_TEMPERATURE` | 可选 | 留空 = 不发送该参数，走服务端默认值 |
+| `LLM_MAX_TOKENS` | 可选 | 同上 |
+| `LLM_TIMEOUT` | 可选 | 单次请求超时秒数 |
+| `LLM_MAX_RETRIES` | 可选 | 请求失败重试次数 |
+| `LLM_ENABLE_THINKING` | 可选 | `true`/`false`；控制思考模式，见下面的坑 |
 | `LANGSMITH_TRACING` | 可选 | 改成 `true` 才上传 trace |
 | `LANGSMITH_API_KEY` | 可选 | LangSmith Key |
 | `LANGSMITH_PROJECT` | 可选 | LangSmith 项目名 |
@@ -164,6 +199,32 @@ LLM_API_KEY=你的 DeepSeek Key
 LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-chat
 ```
+
+模型配置的读取链路：
+
+- `core/config.py` 从 `.env` 读取全部 `LLM_*`：`API_KEY`、`BASE_URL`、`MODEL` 为必填，缺了直接报错；`TEMPERATURE`、`MAX_TOKENS`、`TIMEOUT`、`MAX_RETRIES`、`ENABLE_THINKING` 为可选，留空解析成 `None`。
+- `core/llm.py` 只把这些值里非 `None` 的传给 `ReasoningChatModel`；`LLM_ENABLE_THINKING` 走 `extra_body={"enable_thinking": ...}`。
+- 代码里不再保留任何温度、超时、重试次数的硬编码值，改行为只改 `.env`。
+- `agent/graph.py` 和 `agent/contact_graph.py` 都通过 `build_model()` 取模型，因此共用同一份 `.env` 配置。
+
+坑：思考模式与 `tool_choice`
+
+`ToolStrategy` 靠强制 `tool_choice` 让模型调用结构化输出工具，但部分服务在思考模式下不接受它：
+
+```text
+OpenAIInvalidRequestError: Error code: 400 - The tool_choice parameter does not
+support being set to required or object in thinking mode
+```
+
+实测（`agent/contact_graph.py`，模型一句给全姓名/电话/地址）：
+
+| `LLM_ENABLE_THINKING` | `contact_agent` | `main.py` 的思维链 |
+|---|---|---|
+| `true` | 400 报错 | 有 `[思考]` |
+| `false` | 正常返回 `ContactInfo` | 没有 `[思考]` |
+| 留空 | 400 报错（服务端默认开思考） | 有 `[思考]` |
+
+所以这两个图不能同时各取所需：学结构化输出时把 `.env` 改成 `false`，学思维链时改回 `true`。另外注意 `tool_choice` 传具体函数名时，服务端不报错但会静默不返回 `tool_calls`，只有 `required` 才触发上面这条 400，排查时容易看错方向。
 
 注意：
 
@@ -268,6 +329,14 @@ python -m venv .venv
 **模型 404 / 不存在**
 
 `LLM_MODEL` 可能不在你的账号里。换成账号已开通的模型，例如 `qwen-plus`。
+
+**`Error code: 400 - The tool_choice parameter does not support being set to required or object in thinking mode`**
+
+结构化输出（`ToolStrategy`）在思考模式下被服务端拒绝。把 `.env` 改成 `LLM_ENABLE_THINKING=false` 再重启 `langgraph dev` / 重跑 `main.py`；代价是这一轮拿不到思维链。详见上面「坑：思考模式与 `tool_choice`」。
+
+**`LLM_BASE_URL 还没填` / `LLM_MODEL 还没填`**
+
+代码里不再有默认地址和默认模型名，这两项必须在 `.env` 里写明确。参数项留空则是不发送该参数。
 
 **网页搜索超时**
 
