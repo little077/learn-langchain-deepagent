@@ -1,0 +1,24 @@
+[project]
+name = "langchain-python"
+version = "0.1.0"
+description = "Minimal LangChain + LangGraph agent with three tools"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain>=1.4,<2",
+    "langgraph>=1.2,<2",
+    "langchain-openai>=1.7,<2",
+    "python-dotenv>=1.0",
+    "ddgs>=9.16",
+    "langgraph-cli[inmem]>=0.4",
+    "colorama>=0.4.6; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agent", "core", "tools"]
